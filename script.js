@@ -1,196 +1,253 @@
-const form = document.getElementById("lead-form");
-const statusEl = document.getElementById("form-status");
-const submitBtn = form?.querySelector('button[type="submit"]');
+(function () {
+  const form = document.getElementById("lead-form");
+  const statusEl = document.getElementById("form-status");
+  const submitBtn = document.getElementById("register-btn");
+  const STORAGE_KEY = "intefai_lead_form";
 
-function isConfigured() {
-  const cfg = window.INTEFAI_CONFIG || {};
-  const scriptOk =
-    cfg.GOOGLE_SCRIPT_URL &&
-    !String(cfg.GOOGLE_SCRIPT_URL).includes("PASTE_YOUR_");
-  const keyOk = Boolean(cfg.RAZORPAY_KEY_ID);
-  return { scriptOk, keyOk, cfg };
-}
+  if (!form || !submitBtn) {
+    console.error("Form or register button not found");
+    return;
+  }
 
-function setStatus(message, isError = false) {
-  if (!statusEl) return;
-  statusEl.hidden = false;
-  statusEl.textContent = message;
-  statusEl.style.color = isError ? "#c62828" : "";
-}
+  // Stop native submit/reload (this was clearing filled details)
+  form.setAttribute("action", "javascript:void(0)");
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    startRegistration();
+  });
 
-function setLoading(loading) {
-  if (!submitBtn) return;
-  submitBtn.disabled = loading;
-  submitBtn.textContent = loading
-    ? "Please wait…"
-    : "Register now for ₹9";
-}
+  submitBtn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    startRegistration();
+  });
 
-async function postToAppsScript(payload, scriptUrl) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45000);
+  // Keep typed details even if page reloads
+  restoreForm();
+  form.addEventListener("input", persistForm);
 
-  try {
-    const response = await fetch(scriptUrl, {
+  function cfg() {
+    return window.INTEFAI_CONFIG || {};
+  }
+
+  function setStatus(message, isError) {
+    if (!statusEl) return;
+    statusEl.hidden = false;
+    statusEl.textContent = message;
+    statusEl.style.color = isError ? "#c62828" : "#1a365d";
+  }
+
+  function setLoading(loading) {
+    submitBtn.disabled = loading;
+    submitBtn.textContent = loading ? "Please wait…" : "Register now for ₹9";
+  }
+
+  function persistForm() {
+    const data = Object.fromEntries(new FormData(form).entries());
+    data.consent = Boolean(form.consent && form.consent.checked);
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      sessionStorage.setItem(
+        "intefai_lead",
+        JSON.stringify({
+          firstName: data.firstName || "",
+          lastName: data.lastName || "",
+          email: data.email || "",
+          whatsapp: data.whatsapp || "",
+        })
+      );
+    } catch (err) {
+      console.warn(err);
+    }
+  }
+
+  function restoreForm() {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      ["firstName", "lastName", "whatsapp", "email", "city"].forEach(function (name) {
+        if (form.elements[name] && data[name]) form.elements[name].value = data[name];
+      });
+      if (form.consent) form.consent.checked = Boolean(data.consent);
+    } catch (err) {
+      console.warn(err);
+    }
+  }
+
+  function normalizeContact(value) {
+    const digits = String(value || "").replace(/\D/g, "");
+    if (!digits) return "";
+    if (digits.length === 10) return digits;
+    if (digits.length === 12 && digits.indexOf("91") === 0) return digits.slice(2);
+    return digits;
+  }
+
+  function saveLeadBeacon(payload) {
+    const url = cfg().GOOGLE_SCRIPT_URL;
+    if (!url) return;
+
+    const body = JSON.stringify(payload);
+    try {
+      if (navigator.sendBeacon) {
+        const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
+        navigator.sendBeacon(url, blob);
+        return;
+      }
+    } catch (err) {
+      console.warn(err);
+    }
+
+    // Fallback: don't block UI
+    fetch(url, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    const text = await response.text();
-    let result = null;
-    try {
-      result = JSON.parse(text);
-    } catch {
-      if (response.ok) return { success: true };
-      throw new Error("Could not reach registration server. Please try again.");
-    }
-
-    if (result && result.success === false) {
-      throw new Error(result.error || "Registration failed.");
-    }
-
-    return result || { success: true };
-  } finally {
-    clearTimeout(timer);
+      body: body,
+      keepalive: true,
+      mode: "no-cors",
+    }).catch(function () {});
   }
-}
 
-function openRazorpayCheckout(cfg, formData) {
-  return new Promise((resolve, reject) => {
-    if (typeof Razorpay === "undefined") {
-      reject(new Error("Razorpay SDK failed to load. Please refresh and try again."));
+  function buildPaymentLinkUrl(baseUrl, data) {
+    const url = new URL(baseUrl);
+    if (data.email) url.searchParams.set("prefill[email]", data.email);
+    const contact = normalizeContact(data.whatsapp);
+    if (contact) url.searchParams.set("prefill[contact]", contact);
+    const name = [data.firstName, data.lastName].filter(Boolean).join(" ").trim();
+    if (name) url.searchParams.set("prefill[name]", name);
+    return url.toString();
+  }
+
+  function openCheckoutOrLink(data) {
+    const conf = cfg();
+    const amount = Number(conf.RAZORPAY_AMOUNT_PAISE || 900);
+    const name = [data.firstName, data.lastName].filter(Boolean).join(" ").trim();
+    const contact = normalizeContact(data.whatsapp);
+
+    // Prefer Checkout if SDK + key are available
+    if (typeof Razorpay !== "undefined" && conf.RAZORPAY_KEY_ID) {
+      try {
+        return new Promise(function (resolve, reject) {
+          const options = {
+            key: conf.RAZORPAY_KEY_ID,
+            amount: amount,
+            currency: "INR",
+            name: "IntefAI Academy",
+            description: "AI Video Creation Webinar",
+            prefill: {
+              name: name,
+              email: data.email || "",
+              contact: contact,
+            },
+            notes: {
+              event: "AI Video Creation Webinar",
+              email: data.email || "",
+              whatsapp: data.whatsapp || "",
+              firstName: data.firstName || "",
+              lastName: data.lastName || "",
+              city: data.city || "",
+            },
+            theme: { color: "#e11d8a" },
+            modal: {
+              ondismiss: function () {
+                reject(new Error("Payment window closed. Your details are saved — click Register again."));
+              },
+            },
+            handler: function (response) {
+              saveLeadBeacon({
+                action: "payment_success",
+                email: data.email || "",
+                whatsapp: data.whatsapp || "",
+                name: name,
+                paymentId: response.razorpay_payment_id || "",
+                orderId: response.razorpay_order_id || "",
+                skipOrder: true,
+              });
+              resolve(response);
+            },
+          };
+
+          const rzp = new Razorpay(options);
+          rzp.on("payment.failed", function (resp) {
+            reject(
+              new Error(
+                (resp && resp.error && resp.error.description) ||
+                  "Payment failed. Please try again."
+              )
+            );
+          });
+          rzp.open();
+        });
+      } catch (err) {
+        console.warn("Checkout failed, falling back to payment link", err);
+      }
+    }
+
+    // Reliable fallback: Payment Link (supports many payers if enabled in Razorpay)
+    if (conf.RAZORPAY_PAYMENT_LINK) {
+      const link = buildPaymentLinkUrl(conf.RAZORPAY_PAYMENT_LINK, data);
+      window.location.href = link;
+      return Promise.resolve({ redirected: true });
+    }
+
+    return Promise.reject(
+      new Error("Payment is not configured. Please contact IntefAI Academy.")
+    );
+  }
+
+  async function startRegistration() {
+    if (!form.checkValidity()) {
+      form.reportValidity();
       return;
     }
 
-    const name = [formData.firstName, formData.lastName]
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-    const amount = Number(cfg.RAZORPAY_AMOUNT_PAISE || 900);
+    const conf = cfg();
+    if (!conf.GOOGLE_SCRIPT_URL) {
+      setStatus("Registration server URL missing.", true);
+      return;
+    }
+    if (!conf.RAZORPAY_KEY_ID && !conf.RAZORPAY_PAYMENT_LINK) {
+      setStatus("Razorpay is not configured.", true);
+      return;
+    }
 
-    const options = {
-      key: cfg.RAZORPAY_KEY_ID,
-      amount: amount,
-      currency: "INR",
-      name: "IntefAI Academy",
-      description: "AI Video Creation Webinar — ₹" + Math.round(amount / 100),
-      prefill: {
-        name: name,
-        email: formData.email || "",
-        contact: formData.whatsapp || "",
-      },
-      notes: {
-        event: "AI Video Creation Webinar",
-        email: formData.email || "",
-        whatsapp: formData.whatsapp || "",
-        firstName: formData.firstName || "",
-        lastName: formData.lastName || "",
-        city: formData.city || "",
-      },
-      theme: { color: "#e11d8a" },
-      modal: {
-        ondismiss: function () {
-          reject(new Error("Payment cancelled. You can try again anytime."));
-        },
-      },
-      handler: function (response) {
-        // Fire-and-forget sheet update (Apps Script is slow; don't block redirect)
-        postToAppsScript(
-          {
-            action: "payment_success",
-            email: formData.email || "",
-            whatsapp: formData.whatsapp || "",
-            name: name,
-            paymentId: response.razorpay_payment_id || "",
-            orderId: response.razorpay_order_id || "",
-          },
-          cfg.GOOGLE_SCRIPT_URL
-        ).catch(function (err) {
-          console.warn("Sheet update after payment failed:", err);
-        });
-        resolve(response);
-      },
+    const data = Object.fromEntries(new FormData(form).entries());
+    persistForm();
+
+    const payload = {
+      ...data,
+      consent: Boolean(form.consent && form.consent.checked),
+      event: "AI Video Creation Webinar",
+      amount: "9",
+      source: "Landing Page",
+      submittedAt: new Date().toISOString(),
+      skipOrder: true,
     };
 
-    const checkout = new Razorpay(options);
-    checkout.on("payment.failed", function (resp) {
-      const desc =
-        resp?.error?.description ||
-        "Payment failed. Please try again with another method.";
-      reject(new Error(desc));
-    });
-    checkout.open();
-  });
-}
+    setLoading(true);
+    setStatus("Opening secure payment…");
 
-form?.addEventListener("submit", async (event) => {
-  event.preventDefault();
+    // Save lead without waiting (Apps Script is slow)
+    saveLeadBeacon(payload);
 
-  if (!form.checkValidity()) {
-    form.reportValidity();
-    return;
-  }
+    try {
+      const result = await openCheckoutOrLink(data);
+      if (result && result.redirected) return; // navigated to payment link
 
-  const { scriptOk, keyOk, cfg } = isConfigured();
-
-  if (!keyOk) {
-    setStatus("Razorpay Key ID missing in config.js", true);
-    return;
-  }
-  if (!scriptOk) {
-    setStatus("Google Apps Script URL missing in config.js", true);
-    return;
-  }
-
-  const formData = Object.fromEntries(new FormData(form).entries());
-  const payload = {
-    ...formData,
-    consent: Boolean(form.consent?.checked),
-    event: "AI Video Creation Webinar",
-    amount: "9",
-    source: "Landing Page",
-    submittedAt: new Date().toISOString(),
-    // Skip server-side Razorpay order (slow). Checkout uses public Key ID.
-    skipOrder: true,
-  };
-
-  setLoading(true);
-  setStatus("Opening secure payment…");
-
-  sessionStorage.setItem(
-    "intefai_lead",
-    JSON.stringify({
-      firstName: formData.firstName || "",
-      lastName: formData.lastName || "",
-      email: formData.email || "",
-      whatsapp: formData.whatsapp || "",
-    })
-  );
-
-  // Save lead in background — do not wait ~20–30s before opening Razorpay
-  const savePromise = postToAppsScript(payload, cfg.GOOGLE_SCRIPT_URL).catch(
-    function (err) {
-      console.warn("Lead save delayed/failed:", err);
-      return null;
+      setStatus("Payment successful! Redirecting…");
+      window.location.href =
+        conf.PAYMENT_SUCCESS_URL || "payment-success.html";
+    } catch (err) {
+      console.error(err);
+      // If Checkout fails, try Payment Link once
+      if (conf.RAZORPAY_PAYMENT_LINK) {
+        setStatus("Opening Razorpay payment link…");
+        window.location.href = buildPaymentLinkUrl(conf.RAZORPAY_PAYMENT_LINK, data);
+        return;
+      }
+      setStatus(err.message || "Something went wrong. Please try again.", true);
+      setLoading(false);
     }
-  );
-
-  try {
-    await openRazorpayCheckout(cfg, formData);
-    setStatus("Payment successful! Redirecting…");
-    // Give background save a brief moment, then redirect
-    await Promise.race([
-      savePromise,
-      new Promise(function (r) {
-        setTimeout(r, 1500);
-      }),
-    ]);
-    window.location.href = cfg.PAYMENT_SUCCESS_URL || "payment-success.html";
-  } catch (err) {
-    console.error(err);
-    setStatus(err.message || "Something went wrong. Please try again.", true);
-    setLoading(false);
   }
-});
+})();

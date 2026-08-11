@@ -6,9 +6,10 @@ window.INTEFAI_CONFIG = {
   GOOGLE_SCRIPT_URL:
     "https://script.google.com/macros/s/AKfycbxewPWNELh5A3wjK4US5WnGOlRnGB2CJTvZL8lTj9FLMJbdCpCWYwg89TG48Zg_gdDiXA/exec",
 
-  // Public Key ID only (safe in frontend)
+  // Public Key ID (Checkout). Payment Link is the reliable fallback for many users.
   RAZORPAY_KEY_ID: "rzp_live_TOX6Vtz63LADxm",
   RAZORPAY_AMOUNT_PAISE: 900, // ₹9
+  RAZORPAY_PAYMENT_LINK: "https://rzp.io/rzp/GYxXCw6",
 
   SITE_URL: "https://intefaisolutions.github.io/intefai-webinar-landing/",
   PAYMENT_SUCCESS_URL:
