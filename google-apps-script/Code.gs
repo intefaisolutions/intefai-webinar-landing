@@ -4,32 +4,25 @@
  * After updating this file:
  *   Deploy → Manage deployments → Edit (pencil) → New version → Deploy
  *
- * RAZORPAY WEBHOOK (required for payment status update):
- *   Razorpay Dashboard → Settings → Webhooks → Add
- *   URL: your Apps Script /exec URL (same as form)
- *   Events: payment_link.paid, payment.captured
- *   Copy webhook secret → Apps Script → Project Settings → Script properties
- *     Key: RAZORPAY_WEBHOOK_SECRET  Value: <secret>
- *   (Secret is optional but recommended)
+ * RAZORPAY KEYS (Script properties) — required for multiple payments via Checkout:
+ *   RAZORPAY_KEY_ID     = rzp_live_xxx  (or rzp_test_xxx)
+ *   RAZORPAY_KEY_SECRET = <secret>
+ *   RAZORPAY_AMOUNT_PAISE = 900   (optional, default ₹9 = 900 paise)
  *
- * WHATSAPP (pick one provider — set Script properties):
+ * RAZORPAY WEBHOOK:
+ *   URL: this Apps Script /exec URL
+ *   Events: payment.captured, order.paid, payment_link.paid
+ *   Optional: RAZORPAY_WEBHOOK_SECRET
  *
- * A) Meta WhatsApp Cloud API (official)
- *    WHATSAPP_PROVIDER = meta
- *    WHATSAPP_TOKEN = <permanent access token>
- *    WHATSAPP_PHONE_NUMBER_ID = <phone number id>
- *    WHATSAPP_TEMPLATE_NAME = webinar_registration_confirm   (must be approved)
- *    WHATSAPP_TEMPLATE_LANG = en
- *
- * B) UltraMsg (quick for testing / small volume)
- *    WHATSAPP_PROVIDER = ultramsg
- *    WHATSAPP_INSTANCE_ID = instanceXXXXX
- *    WHATSAPP_TOKEN = <ultramsg token>
+ * WHATSAPP (Script properties):
+ *   WHATSAPP_PROVIDER = meta | ultramsg | none
+ *   (+ provider-specific keys — see previous setup notes)
  */
 
 const SHEET_NAME = "Registrations";
 const EVENT_NAME = "AI Video Creation Webinar";
 const WEBINAR_WHEN = "23rd August 2026 at 7:00 PM";
+const DEFAULT_AMOUNT_PAISE = 900; // ₹9
 
 // Column indexes (1-based)
 const COL = {
@@ -47,6 +40,7 @@ const COL = {
   PAYMENT_ID: 12,
   PAID_AT: 13,
   WA_SENT: 14,
+  ORDER_ID: 15,
 };
 
 function doPost(e) {
@@ -59,12 +53,17 @@ function doPost(e) {
       return handleRazorpayWebhook_(data, e);
     }
 
-    // Manual / success-page confirmation
+    // Manual / success-page / checkout handler confirmation
     if (data.action === "payment_success") {
       return handlePaymentSuccess_(data);
     }
 
-    // Landing page registration
+    // Create order only (if needed)
+    if (data.action === "create_order") {
+      return handleCreateOrder_(data);
+    }
+
+    // Landing page registration + create order for Checkout
     return handleRegistration_(data);
   } catch (err) {
     return json_({ success: false, error: String(err) });
@@ -74,7 +73,7 @@ function doPost(e) {
 function doGet() {
   return json_({
     ok: true,
-    message: "IntefAI webinar endpoint is live (form + Razorpay webhook).",
+    message: "IntefAI webinar endpoint is live (form + Razorpay Checkout + webhook).",
   });
 }
 
@@ -82,29 +81,128 @@ function doGet() {
 
 function handleRegistration_(data) {
   const sheet = getOrCreateSheet_();
+  const email = String(data.email || "")
+    .trim()
+    .toLowerCase();
+  const phone = normalizePhone_(data.whatsapp || "");
+  const firstName = data.firstName || "";
+  const lastName = data.lastName || "";
+  const amountPaise = Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE);
+
+  const order = createRazorpayOrder_({
+    amountPaise: amountPaise,
+    email: email,
+    phone: phone,
+    firstName: firstName,
+    lastName: lastName,
+    city: data.city || "",
+  });
 
   sheet.appendRow([
     new Date(),
-    data.firstName || "",
-    data.lastName || "",
-    normalizePhone_(data.whatsapp || ""),
-    String(data.email || "")
-      .trim()
-      .toLowerCase(),
+    firstName,
+    lastName,
+    phone,
+    email,
     data.city || "",
     data.consent === true || data.consent === "on" || data.consent === "true"
       ? "Yes"
       : "No",
     data.event || EVENT_NAME,
-    data.amount || "9",
+    String(Math.round(amountPaise / 100)),
     "Pending Payment",
     data.source || "Landing Page",
     "",
     "",
     "No",
+    order.orderId || "",
   ]);
 
-  return json_({ success: true });
+  return json_({
+    success: true,
+    razorpay: {
+      keyId: order.keyId,
+      orderId: order.orderId,
+      amount: amountPaise,
+      currency: "INR",
+      name: "IntefAI Academy",
+      description: EVENT_NAME + " — ₹" + Math.round(amountPaise / 100),
+    },
+  });
+}
+
+function handleCreateOrder_(data) {
+  const amountPaise = Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE);
+  const order = createRazorpayOrder_({
+    amountPaise: amountPaise,
+    email: data.email || "",
+    phone: normalizePhone_(data.whatsapp || data.phone || ""),
+    firstName: data.firstName || "",
+    lastName: data.lastName || "",
+    city: data.city || "",
+  });
+  return json_({
+    success: true,
+    razorpay: {
+      keyId: order.keyId,
+      orderId: order.orderId,
+      amount: amountPaise,
+      currency: "INR",
+    },
+  });
+}
+
+function createRazorpayOrder_(info) {
+  const keyId = getProp_("RAZORPAY_KEY_ID");
+  const keySecret = getProp_("RAZORPAY_KEY_SECRET");
+
+  if (!keyId || !keySecret) {
+    throw new Error(
+      "Razorpay keys missing. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Script properties."
+    );
+  }
+
+  const receipt =
+    "intefai_" +
+    Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyyMMdd_HHmmss") +
+    "_" +
+    String(Math.floor(Math.random() * 9000) + 1000);
+
+  const payload = {
+    amount: Number(info.amountPaise) || DEFAULT_AMOUNT_PAISE,
+    currency: "INR",
+    receipt: receipt,
+    payment_capture: 1,
+    notes: {
+      event: EVENT_NAME,
+      email: info.email || "",
+      whatsapp: info.phone || "",
+      firstName: info.firstName || "",
+      lastName: info.lastName || "",
+      city: info.city || "",
+    },
+  };
+
+  const auth = Utilities.base64Encode(keyId + ":" + keySecret);
+  const res = UrlFetchApp.fetch("https://api.razorpay.com/v1/orders", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Basic " + auth },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+
+  const code = res.getResponseCode();
+  const body = JSON.parse(res.getContentText() || "{}");
+  if (code < 200 || code >= 300 || !body.id) {
+    throw new Error(
+      "Razorpay order failed (" + code + "): " + (body.error && body.error.description
+        ? body.error.description
+        : res.getContentText())
+    );
+  }
+
+  return { keyId: keyId, orderId: body.id };
 }
 
 /* ========================= Razorpay webhook ========================= */
@@ -164,6 +262,7 @@ function extractPaymentDetails_(data) {
   let phone = "";
   let name = "";
   let paymentId = "";
+  let orderId = "";
 
   const paymentEntity =
     (payload.payment && payload.payment.entity) || payload.payment || null;
@@ -171,11 +270,28 @@ function extractPaymentDetails_(data) {
     (payload.payment_link && payload.payment_link.entity) ||
     payload.payment_link ||
     null;
+  const orderEntity =
+    (payload.order && payload.order.entity) || payload.order || null;
 
   if (paymentEntity) {
     paymentId = paymentEntity.id || paymentId;
     email = paymentEntity.email || email;
     phone = paymentEntity.contact || phone;
+    orderId = paymentEntity.order_id || orderId;
+    const notes = paymentEntity.notes || {};
+    email = notes.email || email;
+    phone = notes.whatsapp || notes.phone || phone;
+    name =
+      [notes.firstName, notes.lastName].filter(Boolean).join(" ").trim() || name;
+  }
+
+  if (orderEntity) {
+    orderId = orderEntity.id || orderId;
+    const notes = orderEntity.notes || {};
+    email = notes.email || email;
+    phone = notes.whatsapp || notes.phone || phone;
+    name =
+      [notes.firstName, notes.lastName].filter(Boolean).join(" ").trim() || name;
   }
 
   if (linkEntity) {
@@ -186,11 +302,6 @@ function extractPaymentDetails_(data) {
     if (!paymentId && linkEntity.order_id) paymentId = String(linkEntity.order_id);
   }
 
-  // Some payloads nest differently
-  if (!email && payload.payment && payload.payment.entity) {
-    email = payload.payment.entity.email || email;
-  }
-
   return {
     email: String(email || "")
       .trim()
@@ -198,6 +309,7 @@ function extractPaymentDetails_(data) {
     phone: normalizePhone_(phone || ""),
     name: name || "",
     paymentId: paymentId || "",
+    orderId: orderId || "",
   };
 }
 
@@ -425,6 +537,7 @@ function getOrCreateSheet_() {
     "Payment ID",
     "Paid At",
     "WhatsApp Sent",
+    "Order ID",
   ];
 
   if (sheet.getLastRow() === 0) {
