@@ -52,8 +52,9 @@ function doPost(e) {
     const raw = (e && e.postData && e.postData.contents) || "{}";
     const data = JSON.parse(raw);
 
-    // Razorpay webhook payloads include "event"
-    if (data.event) {
+    // Razorpay webhooks have both event + payload (e.g. payment.captured).
+    // Form field "event"/"eventName" must NOT be treated as a webhook.
+    if (data.event && data.payload) {
       return handleRazorpayWebhook_(data, e);
     }
 
@@ -77,7 +78,7 @@ function doPost(e) {
 function doGet() {
   return json_({
     ok: true,
-    version: "payment-link-v2",
+    version: "payment-link-v3",
     message: "IntefAI webinar endpoint (auto Payment Link + callback).",
     hasKeyId: Boolean(getProp_("RAZORPAY_KEY_ID")),
     hasKeySecret: Boolean(getProp_("RAZORPAY_KEY_SECRET")),
@@ -118,7 +119,7 @@ function handleRegistration_(data) {
     data.consent === true || data.consent === "on" || data.consent === "true"
       ? "Yes"
       : "No",
-    data.event || EVENT_NAME,
+    data.eventName || data.event || EVENT_NAME,
     String(Math.round(amountPaise / 100)),
     "Pending Payment",
     data.source || "Landing Page",

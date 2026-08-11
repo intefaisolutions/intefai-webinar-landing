@@ -116,7 +116,7 @@
     const payload = {
       ...data,
       consent: Boolean(form.consent && form.consent.checked),
-      event: "AI Video Creation Webinar",
+      eventName: "AI Video Creation Webinar",
       amount: "9",
       source: "Landing Page",
       submittedAt: new Date().toISOString(),
