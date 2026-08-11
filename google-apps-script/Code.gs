@@ -77,7 +77,11 @@ function doPost(e) {
 function doGet() {
   return json_({
     ok: true,
-    message: "IntefAI webinar endpoint is live (form + Razorpay Checkout + webhook).",
+    version: "payment-link-v2",
+    message: "IntefAI webinar endpoint (auto Payment Link + callback).",
+    hasKeyId: Boolean(getProp_("RAZORPAY_KEY_ID")),
+    hasKeySecret: Boolean(getProp_("RAZORPAY_KEY_SECRET")),
+    hasSuccessUrl: Boolean(getProp_("PAYMENT_SUCCESS_URL")),
   });
 }
 

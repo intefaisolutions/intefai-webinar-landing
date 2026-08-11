@@ -87,7 +87,10 @@
     try {
       result = JSON.parse(text);
     } catch (err) {
-      throw new Error("Could not reach registration server. Please try again.");
+      throw new Error(
+        "Server response invalid. Redeploy Apps Script as Web app (Anyone). Raw: " +
+          String(text).slice(0, 120)
+      );
     }
     if (!result || result.success === false) {
       throw new Error((result && result.error) || "Registration failed.");
@@ -125,13 +128,14 @@
     );
 
     try {
-      // Apps Script creates a NEW Razorpay Payment Link with callback_url
-      // (Dashboard links cannot be edited after creation.)
       const result = await createRegistration(payload);
 
       if (!result.paymentLink) {
         throw new Error(
-          "Payment link not created. Add RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET in Apps Script properties, paste latest Code.gs, and Redeploy."
+          "Old Apps Script still deployed (no paymentLink in response). " +
+            "Open Apps Script → paste latest Code.gs from the project → Save → " +
+            "Deploy → Manage deployments → Edit → New version → Deploy. " +
+            "Also set Script properties: RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET."
         );
       }
 
