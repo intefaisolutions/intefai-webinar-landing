@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Payment Successful | IntefAI Academy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .success-wrap {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 1.5rem;
+      text-align: center;
+    }
+    .success-card {
+      width: min(520px, 100%);
+      background: #fff;
+      border: 1px solid rgba(26, 54, 93, 0.12);
+      border-radius: 16px;
+      padding: 2rem 1.5rem;
+      box-shadow: 0 24px 60px rgba(26, 54, 93, 0.08);
+    }
+    .success-card h1 {
+      margin: 0 0 0.75rem;
+      font-size: 1.6rem;
+      background: linear-gradient(135deg, #ff8c42, #ff4b4b, #b83280);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .success-card p {
+      margin: 0 0 0.75rem;
+      color: #3a4658;
+      line-height: 1.55;
+      font-weight: 500;
+    }
+    .success-card .ok {
+      color: #1a365d;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main class="success-wrap">
+    <div class="success-card">
+      <img src="assets/intefai-logo.png" alt="IntefAI Academy" width="180" style="height:auto;margin-bottom:1rem;" />
+      <h1>Payment successful</h1>
+      <p class="ok" id="status">Confirming your registration…</p>
+      <p>
+        You’re registered for the AI Video Creation Webinar<br />
+        <strong>23rd August 2026 · 7:00 PM · Live Online</strong>
+      </p>
+      <p>A WhatsApp confirmation will be sent to your registered number shortly.</p>
+    </div>
+  </main>
+
+  <script src="config.js"></script>
+  <script>
+    (async function () {
+      const statusEl = document.getElementById("status");
+      const params = new URLSearchParams(window.location.search);
+      const lead = JSON.parse(sessionStorage.getItem("intefai_lead") || "{}");
+
+      const paymentId =
+        params.get("razorpay_payment_id") ||
+        params.get("payment_id") ||
+        "";
+      const linkStatus =
+        params.get("razorpay_payment_link_status") ||
+        params.get("status") ||
+        "";
+
+      if (linkStatus && linkStatus.toLowerCase() !== "paid") {
+        statusEl.textContent = "Payment not completed yet.";
+        return;
+      }
+
+      const cfg = window.INTEFAI_CONFIG || {};
+      if (!cfg.GOOGLE_SCRIPT_URL) {
+        statusEl.textContent = "Registration received. (Sheet sync URL missing)";
+        return;
+      }
+
+      try {
+        await fetch(cfg.GOOGLE_SCRIPT_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify({
+            action: "payment_success",
+            email: lead.email || "",
+            whatsapp: lead.whatsapp || "",
+            name: [lead.firstName, lead.lastName].filter(Boolean).join(" "),
+            paymentId: paymentId,
+          }),
+        });
+        statusEl.textContent = "Registration confirmed. See you in the webinar!";
+      } catch (err) {
+        statusEl.textContent =
+          "Payment done. Confirmation may take a minute — check WhatsApp shortly.";
+      }
+    })();
+  </script>
+</body>
+</html>
