@@ -4,10 +4,14 @@
  * After updating this file:
  *   Deploy → Manage deployments → Edit (pencil) → New version → Deploy
  *
- * RAZORPAY KEYS (Script properties) — required for multiple payments via Checkout:
- *   RAZORPAY_KEY_ID     = rzp_live_xxx  (or rzp_test_xxx)
+ * RAZORPAY KEYS (Script properties) — required:
+ *   RAZORPAY_KEY_ID     = rzp_live_xxx
  *   RAZORPAY_KEY_SECRET = <secret>
- *   RAZORPAY_AMOUNT_PAISE = 900   (optional, default ₹9 = 900 paise)
+ *   RAZORPAY_AMOUNT_PAISE = 900
+ *   PAYMENT_SUCCESS_URL = https://intefaisolutions.github.io/intefai-webinar-landing/payment-success.html
+ *
+ * Each form submit creates a NEW Payment Link with callback_url already set.
+ * (Razorpay dashboard does not allow editing redirect URL after create.)
  *
  * RAZORPAY WEBHOOK:
  *   URL: this Apps Script /exec URL
@@ -89,19 +93,16 @@ function handleRegistration_(data) {
   const lastName = data.lastName || "";
   const amountPaise = Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE);
 
-  // Fast path from website: skipOrder=true opens Checkout with public Key ID.
-  // Optional order creation only when skipOrder is not set and keys exist.
-  let order = { keyId: "", orderId: "" };
-  if (!data.skipOrder) {
-    order = createRazorpayOrder_({
-      amountPaise: amountPaise,
-      email: email,
-      phone: phone,
-      firstName: firstName,
-      lastName: lastName,
-      city: data.city || "",
-    });
-  }
+  // Create a NEW Payment Link per registration (with redirect callback).
+  // Razorpay does not allow editing callback URL after a link is created.
+  const link = createRazorpayPaymentLink_({
+    amountPaise: amountPaise,
+    email: email,
+    phone: phone,
+    firstName: firstName,
+    lastName: lastName,
+    city: data.city || "",
+  });
 
   sheet.appendRow([
     new Date(),
@@ -120,27 +121,19 @@ function handleRegistration_(data) {
     "",
     "",
     "No",
-    order.orderId || "",
+    link.paymentLinkId || "",
   ]);
 
   return json_({
     success: true,
-    razorpay: order.orderId
-      ? {
-          keyId: order.keyId,
-          orderId: order.orderId,
-          amount: amountPaise,
-          currency: "INR",
-          name: "IntefAI Academy",
-          description: EVENT_NAME + " — ₹" + Math.round(amountPaise / 100),
-        }
-      : null,
+    paymentLink: link.shortUrl,
+    paymentLinkId: link.paymentLinkId,
   });
 }
 
 function handleCreateOrder_(data) {
   const amountPaise = Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE);
-  const order = createRazorpayOrder_({
+  const link = createRazorpayPaymentLink_({
     amountPaise: amountPaise,
     email: data.email || "",
     phone: normalizePhone_(data.whatsapp || data.phone || ""),
@@ -150,13 +143,79 @@ function handleCreateOrder_(data) {
   });
   return json_({
     success: true,
-    razorpay: {
-      keyId: order.keyId,
-      orderId: order.orderId,
-      amount: amountPaise,
-      currency: "INR",
-    },
+    paymentLink: link.shortUrl,
+    paymentLinkId: link.paymentLinkId,
   });
+}
+
+function createRazorpayPaymentLink_(info) {
+  const keyId = getProp_("RAZORPAY_KEY_ID");
+  const keySecret = getProp_("RAZORPAY_KEY_SECRET");
+  const callbackUrl =
+    getProp_("PAYMENT_SUCCESS_URL") ||
+    "https://intefaisolutions.github.io/intefai-webinar-landing/payment-success.html";
+
+  if (!keyId || !keySecret) {
+    throw new Error(
+      "Razorpay keys missing. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Script properties."
+    );
+  }
+
+  const name = [info.firstName, info.lastName].filter(Boolean).join(" ").trim();
+  let contact = String(info.phone || "").replace(/\D/g, "");
+  if (contact.length === 10) contact = "91" + contact;
+
+  const payload = {
+    amount: Number(info.amountPaise) || DEFAULT_AMOUNT_PAISE,
+    currency: "INR",
+    accept_partial: false,
+    description:
+      "IntefAI Academy – AI Video Creation Webinar | 23 August 2026 | 7 PM",
+    customer: {
+      name: name || "Participant",
+      email: info.email || "",
+      contact: contact ? "+" + contact : "",
+    },
+    notify: { sms: false, email: false },
+    reminder_enable: false,
+    callback_url: callbackUrl,
+    callback_method: "get",
+    notes: {
+      event: EVENT_NAME,
+      email: info.email || "",
+      whatsapp: info.phone || "",
+      firstName: info.firstName || "",
+      lastName: info.lastName || "",
+      city: info.city || "",
+    },
+  };
+
+  const auth = Utilities.base64Encode(keyId + ":" + keySecret);
+  const res = UrlFetchApp.fetch("https://api.razorpay.com/v1/payment_links", {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Basic " + auth },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+
+  const code = res.getResponseCode();
+  const body = JSON.parse(res.getContentText() || "{}");
+  if (code < 200 || code >= 300 || !body.short_url) {
+    throw new Error(
+      "Razorpay payment link failed (" +
+        code +
+        "): " +
+        (body.error && body.error.description
+          ? body.error.description
+          : res.getContentText())
+    );
+  }
+
+  return {
+    shortUrl: body.short_url,
+    paymentLinkId: body.id || "",
+  };
 }
 
 function createRazorpayOrder_(info) {
@@ -203,9 +262,12 @@ function createRazorpayOrder_(info) {
   const body = JSON.parse(res.getContentText() || "{}");
   if (code < 200 || code >= 300 || !body.id) {
     throw new Error(
-      "Razorpay order failed (" + code + "): " + (body.error && body.error.description
-        ? body.error.description
-        : res.getContentText())
+      "Razorpay order failed (" +
+        code +
+        "): " +
+        (body.error && body.error.description
+          ? body.error.description
+          : res.getContentText())
     );
   }
 

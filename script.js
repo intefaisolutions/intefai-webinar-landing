@@ -76,56 +76,25 @@
     }
   }
 
-  function normalizeContact(value) {
-    const digits = String(value || "").replace(/\D/g, "");
-    if (!digits) return "";
-    if (digits.length === 10) return digits;
-    if (digits.length === 12 && digits.indexOf("91") === 0) return digits.slice(2);
-    return digits;
-  }
-
-  function saveLeadBeacon(payload) {
-    const url = cfg().GOOGLE_SCRIPT_URL;
-    if (!url) return;
-
-    const body = JSON.stringify(payload);
-    try {
-      if (navigator.sendBeacon) {
-        const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
-        navigator.sendBeacon(url, blob);
-        return;
-      }
-    } catch (err) {
-      console.warn(err);
-    }
-
-    fetch(url, {
+  async function createRegistration(payload) {
+    const response = await fetch(cfg().GOOGLE_SCRIPT_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: body,
-      keepalive: true,
-      mode: "no-cors",
-    }).catch(function () {});
+      body: JSON.stringify(payload),
+    });
+    const text = await response.text();
+    let result;
+    try {
+      result = JSON.parse(text);
+    } catch (err) {
+      throw new Error("Could not reach registration server. Please try again.");
+    }
+    if (!result || result.success === false) {
+      throw new Error((result && result.error) || "Registration failed.");
+    }
+    return result;
   }
 
-  function buildPaymentLinkUrl(baseUrl, data) {
-    const url = new URL(baseUrl);
-    if (data.email) url.searchParams.set("prefill[email]", data.email);
-    const contact = normalizeContact(data.whatsapp);
-    if (contact) url.searchParams.set("prefill[contact]", contact);
-    const name = [data.firstName, data.lastName].filter(Boolean).join(" ").trim();
-    if (name) url.searchParams.set("prefill[name]", name);
-    return url.toString();
-  }
-
-  /**
-   * IMPORTANT:
-   * Do NOT open Razorpay Checkout without order_id.
-   * UPI QR can charge the customer but the modal stays stuck
-   * and success callback never fires (double-pay risk).
-   * Payment Link redirect is reliable; after pay Razorpay can
-   * send user to PAYMENT_SUCCESS_URL if configured on the link.
-   */
   async function startRegistration() {
     if (!form.checkValidity()) {
       form.reportValidity();
@@ -135,10 +104,6 @@
     const conf = cfg();
     if (!conf.GOOGLE_SCRIPT_URL) {
       setStatus("Registration server URL missing.", true);
-      return;
-    }
-    if (!conf.RAZORPAY_PAYMENT_LINK) {
-      setStatus("Razorpay payment link missing in config.js", true);
       return;
     }
 
@@ -152,19 +117,30 @@
       amount: "9",
       source: "Landing Page",
       submittedAt: new Date().toISOString(),
-      skipOrder: true,
     };
 
     setLoading(true);
-    setStatus("Saving details & redirecting to Razorpay…");
+    setStatus(
+      "Creating your secure payment link… please wait (may take 15–40 seconds)."
+    );
 
-    saveLeadBeacon(payload);
+    try {
+      // Apps Script creates a NEW Razorpay Payment Link with callback_url
+      // (Dashboard links cannot be edited after creation.)
+      const result = await createRegistration(payload);
 
-    // Small delay so beacon can leave before navigation
-    await new Promise(function (r) {
-      setTimeout(r, 250);
-    });
+      if (!result.paymentLink) {
+        throw new Error(
+          "Payment link not created. Add RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET in Apps Script properties, paste latest Code.gs, and Redeploy."
+        );
+      }
 
-    window.location.href = buildPaymentLinkUrl(conf.RAZORPAY_PAYMENT_LINK, data);
+      setStatus("Redirecting to Razorpay…");
+      window.location.href = result.paymentLink;
+    } catch (err) {
+      console.error(err);
+      setStatus(err.message || "Something went wrong. Please try again.", true);
+      setLoading(false);
+    }
   }
 })();
