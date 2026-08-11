@@ -89,14 +89,19 @@ function handleRegistration_(data) {
   const lastName = data.lastName || "";
   const amountPaise = Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE);
 
-  const order = createRazorpayOrder_({
-    amountPaise: amountPaise,
-    email: email,
-    phone: phone,
-    firstName: firstName,
-    lastName: lastName,
-    city: data.city || "",
-  });
+  // Fast path from website: skipOrder=true opens Checkout with public Key ID.
+  // Optional order creation only when skipOrder is not set and keys exist.
+  let order = { keyId: "", orderId: "" };
+  if (!data.skipOrder) {
+    order = createRazorpayOrder_({
+      amountPaise: amountPaise,
+      email: email,
+      phone: phone,
+      firstName: firstName,
+      lastName: lastName,
+      city: data.city || "",
+    });
+  }
 
   sheet.appendRow([
     new Date(),
@@ -120,14 +125,16 @@ function handleRegistration_(data) {
 
   return json_({
     success: true,
-    razorpay: {
-      keyId: order.keyId,
-      orderId: order.orderId,
-      amount: amountPaise,
-      currency: "INR",
-      name: "IntefAI Academy",
-      description: EVENT_NAME + " — ₹" + Math.round(amountPaise / 100),
-    },
+    razorpay: order.orderId
+      ? {
+          keyId: order.keyId,
+          orderId: order.orderId,
+          amount: amountPaise,
+          currency: "INR",
+          name: "IntefAI Academy",
+          description: EVENT_NAME + " — ₹" + Math.round(amountPaise / 100),
+        }
+      : null,
   });
 }
 

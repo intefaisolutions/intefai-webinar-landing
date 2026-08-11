@@ -7,7 +7,8 @@ function isConfigured() {
   const scriptOk =
     cfg.GOOGLE_SCRIPT_URL &&
     !String(cfg.GOOGLE_SCRIPT_URL).includes("PASTE_YOUR_");
-  return { scriptOk, cfg };
+  const keyOk = Boolean(cfg.RAZORPAY_KEY_ID);
+  return { scriptOk, keyOk, cfg };
 }
 
 function setStatus(message, isError = false) {
@@ -26,29 +27,37 @@ function setLoading(loading) {
 }
 
 async function postToAppsScript(payload, scriptUrl) {
-  const response = await fetch(scriptUrl, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
 
-  const text = await response.text();
-  let result = null;
   try {
-    result = JSON.parse(text);
-  } catch {
-    if (response.ok) return { success: true };
-    throw new Error("Could not reach registration server. Please try again.");
-  }
+    const response = await fetch(scriptUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
 
-  if (result && result.success === false) {
-    throw new Error(result.error || "Registration failed.");
-  }
+    const text = await response.text();
+    let result = null;
+    try {
+      result = JSON.parse(text);
+    } catch {
+      if (response.ok) return { success: true };
+      throw new Error("Could not reach registration server. Please try again.");
+    }
 
-  return result || { success: true };
+    if (result && result.success === false) {
+      throw new Error(result.error || "Registration failed.");
+    }
+
+    return result || { success: true };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function openRazorpayCheckout(rzp, formData, cfg) {
+function openRazorpayCheckout(cfg, formData) {
   return new Promise((resolve, reject) => {
     if (typeof Razorpay === "undefined") {
       reject(new Error("Razorpay SDK failed to load. Please refresh and try again."));
@@ -59,14 +68,14 @@ function openRazorpayCheckout(rzp, formData, cfg) {
       .filter(Boolean)
       .join(" ")
       .trim();
+    const amount = Number(cfg.RAZORPAY_AMOUNT_PAISE || 900);
 
     const options = {
-      key: rzp.keyId,
-      amount: rzp.amount,
-      currency: rzp.currency || "INR",
-      name: rzp.name || "IntefAI Academy",
-      description: rzp.description || "AI Video Creation Webinar",
-      order_id: rzp.orderId,
+      key: cfg.RAZORPAY_KEY_ID,
+      amount: amount,
+      currency: "INR",
+      name: "IntefAI Academy",
+      description: "AI Video Creation Webinar — ₹" + Math.round(amount / 100),
       prefill: {
         name: name,
         email: formData.email || "",
@@ -76,6 +85,9 @@ function openRazorpayCheckout(rzp, formData, cfg) {
         event: "AI Video Creation Webinar",
         email: formData.email || "",
         whatsapp: formData.whatsapp || "",
+        firstName: formData.firstName || "",
+        lastName: formData.lastName || "",
+        city: formData.city || "",
       },
       theme: { color: "#e11d8a" },
       modal: {
@@ -83,22 +95,21 @@ function openRazorpayCheckout(rzp, formData, cfg) {
           reject(new Error("Payment cancelled. You can try again anytime."));
         },
       },
-      handler: async function (response) {
-        try {
-          await postToAppsScript(
-            {
-              action: "payment_success",
-              email: formData.email || "",
-              whatsapp: formData.whatsapp || "",
-              name: name,
-              paymentId: response.razorpay_payment_id || "",
-              orderId: response.razorpay_order_id || rzp.orderId || "",
-            },
-            cfg.GOOGLE_SCRIPT_URL
-          );
-        } catch (err) {
+      handler: function (response) {
+        // Fire-and-forget sheet update (Apps Script is slow; don't block redirect)
+        postToAppsScript(
+          {
+            action: "payment_success",
+            email: formData.email || "",
+            whatsapp: formData.whatsapp || "",
+            name: name,
+            paymentId: response.razorpay_payment_id || "",
+            orderId: response.razorpay_order_id || "",
+          },
+          cfg.GOOGLE_SCRIPT_URL
+        ).catch(function (err) {
           console.warn("Sheet update after payment failed:", err);
-        }
+        });
         resolve(response);
       },
     };
@@ -122,10 +133,14 @@ form?.addEventListener("submit", async (event) => {
     return;
   }
 
-  const { scriptOk, cfg } = isConfigured();
+  const { scriptOk, keyOk, cfg } = isConfigured();
 
+  if (!keyOk) {
+    setStatus("Razorpay Key ID missing in config.js", true);
+    return;
+  }
   if (!scriptOk) {
-    setStatus("Setup incomplete: Google Apps Script URL missing in config.js", true);
+    setStatus("Google Apps Script URL missing in config.js", true);
     return;
   }
 
@@ -137,38 +152,42 @@ form?.addEventListener("submit", async (event) => {
     amount: "9",
     source: "Landing Page",
     submittedAt: new Date().toISOString(),
+    // Skip server-side Razorpay order (slow). Checkout uses public Key ID.
+    skipOrder: true,
   };
 
   setLoading(true);
-  setStatus("Saving your details and opening payment…");
+  setStatus("Opening secure payment…");
+
+  sessionStorage.setItem(
+    "intefai_lead",
+    JSON.stringify({
+      firstName: formData.firstName || "",
+      lastName: formData.lastName || "",
+      email: formData.email || "",
+      whatsapp: formData.whatsapp || "",
+    })
+  );
+
+  // Save lead in background — do not wait ~20–30s before opening Razorpay
+  const savePromise = postToAppsScript(payload, cfg.GOOGLE_SCRIPT_URL).catch(
+    function (err) {
+      console.warn("Lead save delayed/failed:", err);
+      return null;
+    }
+  );
 
   try {
-    const result = await postToAppsScript(payload, cfg.GOOGLE_SCRIPT_URL);
-
-    if (!result.razorpay || !result.razorpay.orderId || !result.razorpay.keyId) {
-      throw new Error(
-        "Razorpay order not created. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Apps Script properties, then redeploy."
-      );
-    }
-
-    sessionStorage.setItem(
-      "intefai_lead",
-      JSON.stringify({
-        firstName: formData.firstName || "",
-        lastName: formData.lastName || "",
-        email: formData.email || "",
-        whatsapp: formData.whatsapp || "",
-      })
-    );
-
-    setStatus("Complete your ₹9 payment in the secure Razorpay window…");
-    await openRazorpayCheckout(result.razorpay, formData, cfg);
-
+    await openRazorpayCheckout(cfg, formData);
     setStatus("Payment successful! Redirecting…");
-    const successUrl =
-      cfg.PAYMENT_SUCCESS_URL ||
-      "payment-success.html";
-    window.location.href = successUrl;
+    // Give background save a brief moment, then redirect
+    await Promise.race([
+      savePromise,
+      new Promise(function (r) {
+        setTimeout(r, 1500);
+      }),
+    ]);
+    window.location.href = cfg.PAYMENT_SUCCESS_URL || "payment-success.html";
   } catch (err) {
     console.error(err);
     setStatus(err.message || "Something went wrong. Please try again.", true);
