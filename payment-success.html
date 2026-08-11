@@ -69,21 +69,27 @@
         params.get("razorpay_payment_id") ||
         params.get("payment_id") ||
         "";
-      const linkStatus =
+      const linkStatus = (
         params.get("razorpay_payment_link_status") ||
         params.get("status") ||
-        "";
+        ""
+      ).toLowerCase();
 
-      if (linkStatus && linkStatus.toLowerCase() !== "paid") {
+      // If Razorpay explicitly says not paid, stop.
+      if (linkStatus && linkStatus !== "paid" && linkStatus !== "captured") {
         statusEl.textContent = "Payment not completed yet.";
         return;
       }
 
       const cfg = window.INTEFAI_CONFIG || {};
       if (!cfg.GOOGLE_SCRIPT_URL) {
-        statusEl.textContent = "Registration received. (Sheet sync URL missing)";
+        statusEl.textContent = "Payment received. (Sheet sync URL missing)";
         return;
       }
+
+      // If no lead in session (different browser), still try with query email if any
+      const email = lead.email || params.get("email") || "";
+      const whatsapp = lead.whatsapp || params.get("contact") || "";
 
       try {
         await fetch(cfg.GOOGLE_SCRIPT_URL, {
@@ -91,8 +97,8 @@
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify({
             action: "payment_success",
-            email: lead.email || "",
-            whatsapp: lead.whatsapp || "",
+            email: email,
+            whatsapp: whatsapp,
             name: [lead.firstName, lead.lastName].filter(Boolean).join(" "),
             paymentId: paymentId,
           }),
@@ -100,7 +106,7 @@
         statusEl.textContent = "Registration confirmed. See you in the webinar!";
       } catch (err) {
         statusEl.textContent =
-          "Payment done. Confirmation may take a minute — check WhatsApp shortly.";
+          "Payment done. Confirmation may take a minute via webhook.";
       }
     })();
   </script>
