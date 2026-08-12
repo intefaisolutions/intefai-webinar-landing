@@ -170,6 +170,17 @@
 
     setLoading(true);
 
+    // Meta Pixel — lead started registration / going to pay
+    try {
+      if (typeof fbq === "function") {
+        fbq("track", "Lead", {
+          content_name: "AI Video Creation Webinar",
+          value: 9.0,
+          currency: "INR",
+        });
+      }
+    } catch (err) {}
+
     // FAST MODE (default): save lead in background + open master payment link instantly
     const useFast = conf.USE_FAST_PAYMENT !== false;
     if (useFast && conf.RAZORPAY_PAYMENT_LINK) {
