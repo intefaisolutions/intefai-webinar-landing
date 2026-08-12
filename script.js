@@ -25,6 +25,16 @@
   restoreForm();
   form.addEventListener("input", persistForm);
 
+  // Warm Apps Script in background (helps only for slow/dynamic mode)
+  try {
+    const conf = window.INTEFAI_CONFIG || {};
+    if (conf.GOOGLE_SCRIPT_URL && conf.USE_FAST_PAYMENT === false) {
+      fetch(conf.GOOGLE_SCRIPT_URL, { method: "GET", mode: "no-cors" }).catch(
+        function () {}
+      );
+    }
+  } catch (err) {}
+
   function cfg() {
     return window.INTEFAI_CONFIG || {};
   }
@@ -76,6 +86,43 @@
     }
   }
 
+  function normalizeContact(value) {
+    const digits = String(value || "").replace(/\D/g, "");
+    if (!digits) return "";
+    if (digits.length === 10) return digits;
+    if (digits.length === 12 && digits.indexOf("91") === 0) return digits.slice(2);
+    return digits;
+  }
+
+  function buildPaymentLinkUrl(baseUrl, data) {
+    const url = new URL(baseUrl);
+    if (data.email) url.searchParams.set("prefill[email]", data.email);
+    const contact = normalizeContact(data.whatsapp);
+    if (contact) url.searchParams.set("prefill[contact]", contact);
+    const name = [data.firstName, data.lastName].filter(Boolean).join(" ").trim();
+    if (name) url.searchParams.set("prefill[name]", name);
+    return url.toString();
+  }
+
+  function saveLeadFast(payload) {
+    const url = cfg().GOOGLE_SCRIPT_URL;
+    if (!url) return;
+    const body = JSON.stringify(payload);
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url, new Blob([body], { type: "text/plain;charset=utf-8" }));
+        return;
+      }
+    } catch (err) {}
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: body,
+      keepalive: true,
+      mode: "no-cors",
+    }).catch(function () {});
+  }
+
   async function createRegistration(payload) {
     const response = await fetch(cfg().GOOGLE_SCRIPT_URL, {
       method: "POST",
@@ -88,8 +135,7 @@
       result = JSON.parse(text);
     } catch (err) {
       throw new Error(
-        "Server response invalid. Redeploy Apps Script as Web app (Anyone). Raw: " +
-          String(text).slice(0, 120)
+        "Server response invalid. Redeploy Apps Script as Web app (Anyone)."
       );
     }
     if (!result || result.success === false) {
@@ -123,22 +169,31 @@
     };
 
     setLoading(true);
+
+    // FAST MODE (default): save lead in background + open master payment link instantly
+    const useFast = conf.USE_FAST_PAYMENT !== false;
+    if (useFast && conf.RAZORPAY_PAYMENT_LINK) {
+      setStatus("Redirecting to Razorpay…");
+      saveLeadFast(Object.assign({}, payload, { fastSave: true, skipPaymentLink: true }));
+      await new Promise(function (r) {
+        setTimeout(r, 200);
+      });
+      window.location.href = buildPaymentLinkUrl(conf.RAZORPAY_PAYMENT_LINK, data);
+      return;
+    }
+
+    // SLOW MODE: create a fresh Payment Link via Apps Script (15–40s)
     setStatus(
       "Creating your secure payment link… please wait (may take 15–40 seconds)."
     );
 
     try {
       const result = await createRegistration(payload);
-
       if (!result.paymentLink) {
         throw new Error(
-          "Old Apps Script still deployed (no paymentLink in response). " +
-            "Open Apps Script → paste latest Code.gs from the project → Save → " +
-            "Deploy → Manage deployments → Edit → New version → Deploy. " +
-            "Also set Script properties: RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET."
+          "Payment link missing in response. Redeploy latest Code.gs or enable USE_FAST_PAYMENT with RAZORPAY_PAYMENT_LINK."
         );
       }
-
       setStatus("Redirecting to Razorpay…");
       window.location.href = result.paymentLink;
     } catch (err) {

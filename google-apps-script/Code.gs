@@ -1,8 +1,16 @@
 /**
  * IntefAI Academy — Google Apps Script
  * ------------------------------------
+ * AUTHORIZATION (fix UrlFetch permission error):
+ *   1. In Apps Script editor, select function: authorizeExternalRequests
+ *   2. Click Run → Review permissions → Advanced → Go to ... (unsafe) → Allow
+ *   3. Then Deploy → Manage deployments → Edit → New version → Deploy
+ *
  * After updating this file:
  *   Deploy → Manage deployments → Edit (pencil) → New version → Deploy
+ *
+ * Also add appsscript.json from this folder (View → Show manifest file)
+ * so oauthScopes include script.external_request.
  *
  * RAZORPAY KEYS (Script properties) — required:
  *   RAZORPAY_KEY_ID     = rzp_live_xxx
@@ -86,6 +94,50 @@ function doGet() {
   });
 }
 
+/**
+ * Run this once from the Apps Script editor (Run button)
+ * to grant UrlFetchApp / external_request permission.
+ * NOTE: name must NOT end with "_" or it won't appear in the Run dropdown.
+ */
+function authorizeExternalRequests() {
+  UrlFetchApp.fetch("https://api.razorpay.com/v1/payments?count=1", {
+    method: "get",
+    headers: {
+      Authorization:
+        "Basic " +
+        Utilities.base64Encode(
+          (getProp_("RAZORPAY_KEY_ID") || "rzp_test") +
+            ":" +
+            (getProp_("RAZORPAY_KEY_SECRET") || "secret")
+        ),
+    },
+    muteHttpExceptions: true,
+  });
+  Logger.log("External request permission OK");
+}
+
+/**
+ * Run ONCE to create a reusable master Payment Link (with success redirect).
+ * Copy the logged short_url into config.js → RAZORPAY_PAYMENT_LINK
+ * Then the website can redirect instantly (no 20–40s wait).
+ */
+function createMasterPaymentLink() {
+  const link = createRazorpayPaymentLink_({
+    amountPaise: Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE),
+    email: "",
+    phone: "",
+    firstName: "IntefAI",
+    lastName: "Webinar",
+    city: "",
+  });
+  Logger.log("========================================");
+  Logger.log("MASTER PAYMENT LINK (paste in config.js):");
+  Logger.log(link.shortUrl);
+  Logger.log("Payment Link ID: " + link.paymentLinkId);
+  Logger.log("========================================");
+  return link.shortUrl;
+}
+
 /* ========================= Registration ========================= */
 
 function handleRegistration_(data) {
@@ -98,8 +150,31 @@ function handleRegistration_(data) {
   const lastName = data.lastName || "";
   const amountPaise = Number(getProp_("RAZORPAY_AMOUNT_PAISE") || DEFAULT_AMOUNT_PAISE);
 
-  // Create a NEW Payment Link per registration (with redirect callback).
-  // Razorpay does not allow editing callback URL after a link is created.
+  // Fast path: only save lead (website redirects to master payment link instantly)
+  if (data.fastSave || data.skipPaymentLink) {
+    sheet.appendRow([
+      new Date(),
+      firstName,
+      lastName,
+      phone,
+      email,
+      data.city || "",
+      data.consent === true || data.consent === "on" || data.consent === "true"
+        ? "Yes"
+        : "No",
+      data.eventName || data.event || EVENT_NAME,
+      String(Math.round(amountPaise / 100)),
+      "Pending Payment",
+      data.source || "Landing Page",
+      "",
+      "",
+      "No",
+      "",
+    ]);
+    return json_({ success: true, fastSave: true });
+  }
+
+  // Slow path: create a NEW Payment Link per registration (with redirect callback).
   const link = createRazorpayPaymentLink_({
     amountPaise: amountPaise,
     email: email,
@@ -176,11 +251,6 @@ function createRazorpayPaymentLink_(info) {
     accept_partial: false,
     description:
       "IntefAI Academy – AI Video Creation Webinar | 23 August 2026 | 7 PM",
-    customer: {
-      name: name || "Participant",
-      email: info.email || "",
-      contact: contact ? "+" + contact : "",
-    },
     notify: { sms: false, email: false },
     reminder_enable: false,
     callback_url: callbackUrl,
@@ -194,6 +264,16 @@ function createRazorpayPaymentLink_(info) {
       city: info.city || "",
     },
   };
+
+  if (info.email || contact) {
+    payload.customer = {
+      name: name || "Participant",
+      email: info.email || "",
+      contact: contact ? "+" + contact : undefined,
+    };
+    if (!payload.customer.contact) delete payload.customer.contact;
+    if (!payload.customer.email) delete payload.customer.email;
+  }
 
   const auth = Utilities.base64Encode(keyId + ":" + keySecret);
   const res = UrlFetchApp.fetch("https://api.razorpay.com/v1/payment_links", {
