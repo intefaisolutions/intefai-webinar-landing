@@ -9,11 +9,13 @@ window.INTEFAI_CONFIG = {
   RAZORPAY_KEY_ID: "rzp_live_TOX6Vtz63LADxm",
   RAZORPAY_AMOUNT_PAISE: 900, // ₹9
 
-  // FAST MODE: instant redirect to this master link (no 20–40s wait).
-  // Create it once in Apps Script: Run → createMasterPaymentLink
-  // Then paste the logged URL here (must include callback/success redirect).
-  USE_FAST_PAYMENT: true,
-  RAZORPAY_PAYMENT_LINK: "https://rzp.io/rzp/GYxXCw6",
+  // IMPORTANT: Keep false so EACH registration gets a NEW Payment Link.
+  // A single master link becomes "Payment Completed" after the first pay
+  // and will not ask new users for payment again.
+  USE_FAST_PAYMENT: false,
+
+  // Only used if USE_FAST_PAYMENT is true (not recommended for multi-user webinars)
+  RAZORPAY_PAYMENT_LINK: "https://rzp.io/rzp/ixt8TfNK",
 
   SITE_URL: "https://intefaisolutions.github.io/intefai-webinar-landing/",
   PAYMENT_SUCCESS_URL:
